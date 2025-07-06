@@ -1,0 +1,1 @@
+This are the register sets of the various NIBE models. Exported from NIBE Modbus manager and converted to JSON by Fredrik Anerdin / https://github.com/anerdins/nibepi.
