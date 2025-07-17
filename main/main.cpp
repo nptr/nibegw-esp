@@ -13,8 +13,10 @@
 #include <mdns.h>
 #include <nvs_flash.h>
 
+#include <optional>
 #include <vector>
 
+std::optional<sys::wifisvc> g_wifi;
 wifi_config_t g_wifi_config = {
     .sta = {
         .ssid = CONFIG_NGW_WIFI_SSID,
@@ -26,12 +28,21 @@ wifi_config_t g_wifi_config = {
     }
 };
 
-sys::nibeclient::config_t g_gw_config = { .enable_necessary = true,
+
+std::optional<sys::nibeclient> g_gw;
+sys::nibeclient::config_t g_gw_config = {
+    .enable_necessary = true,
     .enable_pin = (gpio_num_t)CONFIG_NGW_UART_RS485_RTS,
     .uart_port = (uart_port_t)CONFIG_NGW_UART_RS485_PORT_NUM,
     .uart_tx_pin = (gpio_num_t)CONFIG_NGW_UART_RS485_TX,
     .uart_rx_pin = (gpio_num_t)CONFIG_NGW_UART_RS485_RX,
-    .address = 0x0020 };
+    .address = 0x0020
+};
+
+std::optional<sys::modbus> g_mb;
+sys::modbus::config_t g_mb_config = { 
+    .netif = nullptr
+};
 
 
 constexpr const char* TAG = "nibegw.main";
@@ -57,14 +68,14 @@ extern "C" void app_main(void)
         esp_log_set_vprintf(udp_log);
     }
 
-    sys::wifisvc wifi(g_wifi_config);
-    ESP_ERROR_CHECK(wifi.start());
+    g_wifi = std::make_optional<sys::wifisvc>(g_wifi_config);
+    ESP_ERROR_CHECK(g_wifi->start());
 
-    sys::modbus::config_t mb_config = { .netif = wifi.get_netif() };
-    sys::modbus mb(mb_config);
+    g_mb_config.netif = g_wifi->get_netif();
+    g_mb = std::make_optional<sys::modbus>(g_mb_config);
 
     g_gw_config.on_read_request = [&](uint16_t& to_read) {
-        auto rq = mb.get_read_queue();
+        auto rq = g_mb->get_read_queue();
         auto rc = xQueueReceive(rq, &to_read, 0);
         if (rc == pdFALSE) {
             return false;
@@ -82,11 +93,11 @@ extern "C" void app_main(void)
         ESP_LOGI(TAG, "Read response for register: %u, Value: %" PRIu32 "", read.reg + 1,
             read.value >> 16);
         read.reg = REG_NIBE_TO_HA(read.reg);
-        mb.update_register_u32(read.reg, read.value);
+        g_mb->update_register_u32(read.reg, read.value);
     };
 
     g_gw_config.on_write_request = [&](sys::nibeclient::datapoint& to_write) {
-        auto wq = mb.get_write_queue();
+        auto wq = g_mb->get_write_queue();
 
         sys::modbus::write_request wrq;
         auto rc = xQueueReceive(wq, &wrq, 0);
@@ -118,15 +129,15 @@ extern "C" void app_main(void)
         for (auto& dp : points) {
             ESP_LOGI(TAG, "Refresh of register: %u, Value: %" PRIu32 "", dp.reg, dp.value);
             uint16_t reg = REG_NIBE_TO_HA(dp.reg);
-            mb.update_register_u16(reg, (uint16_t)dp.value);
+            g_mb->update_register_u16(reg, (uint16_t)dp.value);
         }
         return true;
     };
-    sys::nibeclient gw(g_gw_config);
 
+    g_gw = std::make_optional<sys::nibeclient>(g_gw_config);
 
-    ESP_ERROR_CHECK(gw.start());
-    ESP_ERROR_CHECK(mb.start());
+    ESP_ERROR_CHECK(g_gw->start());
+    ESP_ERROR_CHECK(g_mb->start());
 
     ESP_LOGI(TAG, "Started!");
 
