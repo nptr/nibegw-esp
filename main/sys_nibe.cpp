@@ -279,15 +279,15 @@ int dedup_copy(uint8_t* dst, const uint8_t* src, size_t size)
         return 0;
 
     const uint8_t* ori = dst;
-    const uint8_t* end = src + size - 1;
+    const uint8_t* end = src + size;
     while (src < end) {
-        if ((*src) == 0x5C && *(src + 1) == 0x5C)
+        if (((src + 1) < end) && ((*src) == 0x5C) && (*(src + 1) == 0x5C)) {
             src++;
+        }
         *dst++ = *src++;
     }
 
-    *dst++ = *src++;
-    return dst - ori - 1;
+    return dst - ori;
 }
 
 
