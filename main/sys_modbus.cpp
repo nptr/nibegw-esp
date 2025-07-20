@@ -15,9 +15,16 @@ constexpr auto TAG = "sys.modbus";
 constexpr size_t MAX_REGS = 10000;
 
 static uint16_t g_holding_regs[MAX_REGS];
+static uint16_t g_input_regs[MAX_REGS];
 static SemaphoreHandle_t g_hregs_mutex; // overzealous locking..
+static SemaphoreHandle_t g_iregs_mutex; // overzealous locking..
 static QueueHandle_t g_read_queue;
 static QueueHandle_t g_write_queue;
+
+#define REG_HOLDING_TO_NIBE(reg) (reg + 40000)
+#define REG_NIBE_TO_HOLDING(reg) (reg - 40000)
+#define REG_INPUT_TO_NIBE(reg) (reg + 30000)
+#define REG_NIBE_TO_INPUT(reg) (reg - 30000)
 
 /* HACK: Overriding `mbc_reg_holding_slave_cb` because the `esp-modbus` implementation
  * can't read u32 as big endian. Also, there seems to be no way to pass a user context
@@ -50,7 +57,7 @@ extern "C" mb_err_enum_t mbc_reg_holding_slave_cb(mb_base_t* inst, uint8_t* reg_
         }
 
         modbus::read_request rrq;
-        rrq.reg = address;
+        rrq.reg = REG_HOLDING_TO_NIBE(address);
         if (xQueueSend(g_read_queue, &rrq, pdMS_TO_TICKS(1)) == pdPASS) {
             ESP_LOGI(TAG, "Reading holding register: %u, NRegs: %u", (unsigned)address,
                 (unsigned)n_regs);
@@ -61,7 +68,7 @@ extern "C" mb_err_enum_t mbc_reg_holding_slave_cb(mb_base_t* inst, uint8_t* reg_
     } break;
     case MB_REG_WRITE:
         modbus::write_request wrq;
-        wrq.reg = address;
+        wrq.reg = REG_HOLDING_TO_NIBE(address);
 
         if (n_regs == 2) {
             xSemaphoreTake(g_hregs_mutex, portMAX_DELAY);
@@ -92,13 +99,50 @@ extern "C" mb_err_enum_t mbc_reg_holding_slave_cb(mb_base_t* inst, uint8_t* reg_
 }
 
 
+extern "C" mb_err_enum_t mbc_reg_input_slave_cb(
+    mb_base_t* inst, uint8_t* reg_buffer, uint16_t address, uint16_t n_regs)
+{
+    if (address >= MAX_REGS) {
+        return MB_ENOREG;
+    }
+
+    if (n_regs == 2) {
+        xSemaphoreTake(g_iregs_mutex, portMAX_DELAY);
+        *reg_buffer++ = g_input_regs[address + 0] >> 8; // LW, HB
+        *reg_buffer++ = g_input_regs[address + 0] & 0xFF; // LW, LB
+        *reg_buffer++ = g_input_regs[address + 1] >> 8; // HW, HB
+        *reg_buffer++ = g_input_regs[address + 1] & 0xFF; // HW, LB
+        xSemaphoreGive(g_iregs_mutex);
+    } else if (n_regs == 1) {
+        xSemaphoreTake(g_iregs_mutex, portMAX_DELAY);
+        *reg_buffer++ = g_input_regs[address + 0] >> 8; // HB
+        *reg_buffer++ = g_input_regs[address + 0] & 0xFF; // LB
+        xSemaphoreGive(g_iregs_mutex);
+    } else {
+        return MB_EINVAL; // No arbitrary reads
+    }
+
+    modbus::read_request rrq;
+    rrq.reg = REG_INPUT_TO_NIBE(address);
+    if (xQueueSend(g_read_queue, &rrq, pdMS_TO_TICKS(1)) == pdPASS) {
+        ESP_LOGI(TAG, "Reading input register: %u, NRegs: %u", (unsigned)address, (unsigned)n_regs);
+    } else {
+        ESP_LOGI(TAG, "Reading input register: %u, NRegs: %u - Queue is full.", (unsigned)address,
+            (unsigned)n_regs);
+    }
+
+    return MB_ENOERR;
+}
+
+
 modbus::modbus(config_t cfg)
     : m_config(cfg)
     , m_slave(nullptr)
 {
     g_hregs_mutex = xSemaphoreCreateMutex();
-    g_read_queue = xQueueCreate(20, sizeof(read_request));
-    g_write_queue = xQueueCreate(20, sizeof(write_request));
+    g_iregs_mutex = xSemaphoreCreateMutex();
+    g_read_queue = xQueueCreate(30, sizeof(read_request));
+    g_write_queue = xQueueCreate(30, sizeof(write_request));
 }
 
 
@@ -134,25 +178,50 @@ QueueHandle_t modbus::get_write_queue() const { return g_write_queue; };
 
 void modbus::update_register_u16(uint16_t reg, uint16_t value)
 {
-    if (reg >= MAX_REGS) {
-        return;
-    }
+    if (reg >= 40000) {
+        reg = REG_NIBE_TO_HOLDING(reg);
+        if (reg >= MAX_REGS) {
+            return;
+        }
 
-    xSemaphoreTake(g_hregs_mutex, portMAX_DELAY);
-    g_holding_regs[reg] = value;
-    xSemaphoreGive(g_hregs_mutex);
+        xSemaphoreTake(g_hregs_mutex, portMAX_DELAY);
+        g_holding_regs[reg] = value;
+        xSemaphoreGive(g_hregs_mutex);
+    } else if (reg >= 30000) {
+        reg = REG_NIBE_TO_INPUT(reg);
+        if (reg >= MAX_REGS) {
+            return;
+        }
+
+        xSemaphoreTake(g_iregs_mutex, portMAX_DELAY);
+        g_input_regs[reg] = value;
+        xSemaphoreGive(g_iregs_mutex);
+    }
 }
 
 
 void modbus::update_register_u32(uint16_t reg, uint32_t value)
 {
-    if (reg - 1 >= MAX_REGS) {
-        return;
-    }
+    if (reg >= 40000) {
+        reg = REG_NIBE_TO_HOLDING(reg);
+        if (reg - 1 >= MAX_REGS) {
+            return;
+        }
 
-    xSemaphoreTake(g_hregs_mutex, portMAX_DELAY);
-    g_holding_regs[reg] = value & 0xFFFF;
-    g_holding_regs[reg + 1] = (value >> 16) & 0xFFFF;
-    xSemaphoreGive(g_hregs_mutex);
+        xSemaphoreTake(g_hregs_mutex, portMAX_DELAY);
+        g_holding_regs[reg] = value & 0xFFFF;
+        g_holding_regs[reg + 1] = (value >> 16) & 0xFFFF;
+        xSemaphoreGive(g_hregs_mutex);
+    } else if (reg >= 30000) {
+        reg = REG_NIBE_TO_INPUT(reg);
+        if (reg - 1 >= MAX_REGS) {
+            return;
+        }
+
+        xSemaphoreTake(g_iregs_mutex, portMAX_DELAY);
+        g_input_regs[reg] = value & 0xFFFF;
+        g_input_regs[reg + 1] = (value >> 16) & 0xFFFF;
+        xSemaphoreGive(g_iregs_mutex);
+    }
 }
 }

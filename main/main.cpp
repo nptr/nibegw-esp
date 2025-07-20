@@ -16,6 +16,7 @@
 #include <optional>
 #include <vector>
 
+// clang-format off
 std::optional<sys::wifisvc> g_wifi;
 wifi_config_t g_wifi_config = {
     .sta = {
@@ -27,7 +28,6 @@ wifi_config_t g_wifi_config = {
         .pmf_cfg = { .capable = true, .required = false },
     }
 };
-
 
 std::optional<sys::nibeclient> g_gw;
 sys::nibeclient::config_t g_gw_config = {
@@ -43,13 +43,10 @@ std::optional<sys::modbus> g_mb;
 sys::modbus::config_t g_mb_config = { 
     .netif = nullptr
 };
+// clang-format on
 
 
 constexpr const char* TAG = "nibegw.main";
-
-#define REG_HA_TO_NIBE(reg) (reg + 40000)
-#define REG_NIBE_TO_HA(reg) (reg - 40000)
-
 
 extern "C" void app_main(void)
 {
@@ -81,7 +78,6 @@ extern "C" void app_main(void)
             return false;
         }
 
-        to_read = REG_HA_TO_NIBE(to_read); // out param!
         ESP_LOGI(TAG, "Requesting register: %u", to_read);
         return true;
     };
@@ -92,7 +88,6 @@ extern "C" void app_main(void)
             read.value & 0xFFFF);
         ESP_LOGI(TAG, "Read response for register: %u, Value: %" PRIu32 "", read.reg + 1,
             read.value >> 16);
-        read.reg = REG_NIBE_TO_HA(read.reg);
         g_mb->update_register_u32(read.reg, read.value);
     };
 
@@ -105,7 +100,7 @@ extern "C" void app_main(void)
             return false;
         }
 
-        to_write.reg = REG_HA_TO_NIBE(wrq.reg);
+        to_write.reg = wrq.reg;
         to_write.value = wrq.value;
 
         if (CONFIG_NGW_ENABLE_WRITES) {
@@ -128,8 +123,7 @@ extern "C" void app_main(void)
     g_gw_config.on_periodic_update = [&](const std::vector<sys::nibeclient::datapoint>& points) {
         for (auto& dp : points) {
             ESP_LOGI(TAG, "Refresh of register: %u, Value: %" PRIu32 "", dp.reg, dp.value);
-            uint16_t reg = REG_NIBE_TO_HA(dp.reg);
-            g_mb->update_register_u16(reg, (uint16_t)dp.value);
+            g_mb->update_register_u16(dp.reg, (uint16_t)dp.value);
         }
         return true;
     };
